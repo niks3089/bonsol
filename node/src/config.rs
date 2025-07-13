@@ -7,6 +7,8 @@ use {
     std::path::Path,
 };
 
+use crate::fee_service::FeeServiceConfig;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub enum IngesterConfig {
     RpcBlockSubscription {
@@ -72,6 +74,8 @@ pub struct ProverNodeConfig {
     pub metrics_config: MetricsConfig,
     #[serde(default)]
     pub missing_image_strategy: MissingImageStrategy,
+    #[serde(default = "default_fee_service_config")]
+    pub fee_service_config: FeeServiceConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -84,6 +88,10 @@ pub enum MetricsConfig {
 
 const fn default_metrics_config() -> MetricsConfig {
     MetricsConfig::None
+}
+
+fn default_fee_service_config() -> FeeServiceConfig {
+    FeeServiceConfig::default()
 }
 
 fn default_stark_compression_tools_path() -> String {
@@ -162,6 +170,7 @@ impl Default for ProverNodeConfig {
             stark_compression_tools_path: default_stark_compression_tools_path(),
             metrics_config: default_metrics_config(),
             missing_image_strategy: MissingImageStrategy::default(),
+            fee_service_config: default_fee_service_config(),
         }
     }
 }
