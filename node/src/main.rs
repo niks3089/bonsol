@@ -1,6 +1,7 @@
 pub mod types;
 #[macro_use]
 pub mod observe;
+mod fee_service;
 mod ingest;
 
 pub mod config;

@@ -11,6 +11,7 @@ use {
 use {
     crate::{
         config::ProverNodeConfig,
+        fee_service::FeeService,
         observe::*,
         risc0_runner::utils::async_to_json,
         transaction_sender::{RpcTransactionSender, TransactionSender},
@@ -118,6 +119,7 @@ pub struct Risc0Runner {
     self_identity: Arc<Pubkey>,
     inflight_proofs: InflightProofs,
     input_resolver: Arc<dyn InputResolver + 'static>,
+    fee_service: Arc<FeeService>,
 }
 
 impl Risc0Runner {
@@ -148,6 +150,11 @@ impl Risc0Runner {
             }
         }
 
+        let fee_service = Arc::new(FeeService::new(
+            txn_sender.rpc_client.clone(),
+            config.fee_service_config.clone(),
+        ));
+
         Ok(Risc0Runner {
             config: Arc::new(config),
             loaded_images: Arc::new(loaded_images),
@@ -158,6 +165,7 @@ impl Risc0Runner {
             self_identity: Arc::new(self_identity),
             inflight_proofs: Arc::new(DashMap::new()),
             input_resolver,
+            fee_service,
         })
     }
 
@@ -242,6 +250,7 @@ impl Risc0Runner {
         let inflight_proofs = self.inflight_proofs.clone();
         let txn_sender = self.txn_sender.clone();
         let input_resolver = self.input_resolver.clone();
+        let fee_service = self.fee_service.clone();
         self.worker_handle = Some(tokio::spawn(async move {
             while let Some(bix) = rx.recv().await {
                 let txn_sender = txn_sender.clone();
@@ -252,6 +261,7 @@ impl Risc0Runner {
                 let self_id = self_id.clone();
                 let input_staging_area = input_staging_area.clone();
                 let inflight_proofs = inflight_proofs.clone();
+                let fee_service = fee_service.clone();
                 tokio::spawn(async move {
                     let bonsol_ix_type =
                         parse_ix_data(&bix.data).map_err(|_| Risc0RunnerError::InvalidData)?;
@@ -302,6 +312,7 @@ impl Risc0Runner {
                                 bix.last_known_block,
                                 payload,
                                 &bix.accounts,
+                                fee_service.clone(),
                             )
                             .await
                         }
@@ -486,6 +497,7 @@ async fn handle_execution_request<'a>(
     _execution_block: u64,
     exec: ExecutionRequestV1<'a>,
     accounts: &[Pubkey],
+    fee_service: Arc<FeeService>,
 ) -> Result<()> {
     if !can_execute(exec) {
         warn!(
@@ -553,6 +565,83 @@ async fn handle_execution_request<'a>(
         let computable_by = expiry / 2;
 
         if computable_by < expiry {
+            // Check profitability before claiming using the fee service
+            let tip_lamports = exec.tip();
+            let execution_account = accounts[2];
+
+            // Estimate claiming fee
+            let claim_fee_estimate = match fee_service.estimate_claim_fee(&execution_account).await
+            {
+                Ok(estimate) => estimate,
+                Err(e) => {
+                    warn!("Failed to estimate claim fee: {:?}, using general fee", e);
+                    fee_service
+                        .estimate_general_fee()
+                        .await
+                        .unwrap_or_else(|_| {
+                            warn!("Failed to get general fee estimate, using default");
+                            crate::fee_service::FeeEstimate {
+                                micro_lamports_per_cu: 1_000,
+                            }
+                        })
+                }
+            };
+
+            // Estimate proving fee (using callback accounts if available)
+            let proving_accounts: Vec<Pubkey> =
+                if let Some(callback_accounts) = exec.callback_extra_accounts() {
+                    callback_accounts
+                        .iter()
+                        .map(|a| {
+                            let pkbytes: [u8; 32] = a.pubkey().into();
+                            Pubkey::try_from(pkbytes).unwrap_or_default()
+                        })
+                        .collect()
+                } else {
+                    vec![execution_account]
+                };
+
+            let proving_fee_estimate =
+                match fee_service.estimate_proving_fee(&proving_accounts).await {
+                    Ok(estimate) => estimate,
+                    Err(e) => {
+                        warn!("Failed to estimate proving fee: {:?}, using general fee", e);
+                        fee_service
+                            .estimate_general_fee()
+                            .await
+                            .unwrap_or_else(|_| {
+                                warn!("Failed to get general fee estimate, using default");
+                                crate::fee_service::FeeEstimate {
+                                    micro_lamports_per_cu: 1_000,
+                                }
+                            })
+                    }
+                };
+
+            // Calculate transaction costs (assuming ~200k CU for claiming, ~400k CU for proving)
+            let claim_cost = fee_service.calculate_transaction_cost(200_000, &claim_fee_estimate);
+            let proving_cost =
+                fee_service.calculate_transaction_cost(400_000, &proving_fee_estimate);
+
+            // Check if this execution is profitable
+            if !fee_service.is_profitable(tip_lamports, claim_cost, proving_cost) {
+                info!(
+                    "Execution {} not profitable: tip={}, claim_cost={}, proving_cost={}, total_cost={}",
+                    eid, tip_lamports, claim_cost, proving_cost, claim_cost + proving_cost
+                );
+                emit_event!(MetricEvents::UnprofitableExecution, execution_id => eid);
+                return Ok(());
+            }
+
+            info!(
+                "Execution {} is profitable: tip={}, claim_cost={}, proving_cost={}, profit={}",
+                eid,
+                tip_lamports,
+                claim_cost,
+                proving_cost,
+                tip_lamports - (claim_cost + proving_cost)
+            );
+
             //the way this is done can cause race conditions where so many request come in a short time that we accept
             // them before we change the value of g so we optimistically change to inflight and we will decrement if we dont win the claim
             let inputs = exec.input().ok_or(Risc0RunnerError::InvalidData)?;
@@ -648,14 +737,14 @@ async fn handle_image_deployment<'a>(
     loaded_images: LoadedImageMapRef<'a>,
 ) -> Result<()> {
     let url = deploy.url().ok_or(Risc0RunnerError::InvalidData)?;
-    let size = deploy.size_();
+    let size = deploy.size();
     let image_id = deploy.image_id().unwrap_or_default();
     let program_name = deploy.program_name().unwrap_or_default();
-    
+
     info!("Attempting to download image from URL: {}", url);
     info!("Image ID: {}, Size: {}", image_id, size);
     info!("Program name: {}", program_name);
-    
+
     emit_histogram!(MetricEvents::ImageDownload, size as f64, url => url.to_string());
     emit_event_with_duration!(MetricEvents::ImageDownload, {
         // The URL from deployment data already includes the full path

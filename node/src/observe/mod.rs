@@ -29,6 +29,11 @@ pub enum MetricEvents {
     IncompatibleProverVersion,
     ProofSubmissionError,
     TransactionExpired,
+    UnprofitableExecution,
+    ExecutionAddedToRetryQueue,
+    ExecutionRetried,
+    ExecutionRemovedFromRetryQueue,
+    ExecutionRetryExpired,
 }
 
 macro_rules! emit_event {
