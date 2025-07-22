@@ -13,3 +13,8 @@ env = "dev"
 Rpc = { rpc_url = "http://localhost:8899" }
 [signer_config]
 KeypairFile = { path = "node_keypair.json" }
+[fee_service_config]
+cache_duration_secs = 5
+default_micro_lamports_per_cu = 1000
+fallback_micro_lamports_per_cu = 5000
+percentile = 75

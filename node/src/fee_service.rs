@@ -3,10 +3,12 @@ use {
     serde::{Deserialize, Serialize},
     solana_rpc_client::nonblocking::rpc_client::RpcClient,
     solana_sdk::pubkey::Pubkey,
-    std::{sync::Arc, time::Duration},
+    std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    },
     tracing::{error, info, warn},
 };
-
 #[derive(Debug, Clone)]
 pub struct FeeEstimate {
     pub micro_lamports_per_cu: u64,
@@ -41,6 +43,12 @@ pub struct FeeService {
 
 impl FeeService {
     pub fn new(rpc_client: Arc<RpcClient>, config: FeeServiceConfig) -> Self {
+        info!(
+            "Initializing FeeService with config: default_cu={}, fallback_cu={}, percentile={}%",
+            config.default_micro_lamports_per_cu,
+            config.fallback_micro_lamports_per_cu,
+            config.percentile
+        );
         Self {
             rpc_client,
             config,
@@ -54,9 +62,27 @@ impl FeeService {
     /// Get fee estimate for claiming transactions
     /// This estimates the cost of sending a claim transaction
     pub async fn estimate_claim_fee(&self, execution_account: &Pubkey) -> Result<FeeEstimate> {
+        info!(
+            "Estimating claim fee for execution account: {}",
+            execution_account
+        );
         // For claiming, we need to check fees for the execution account
-        self.get_prioritization_fees_for_accounts(&[*execution_account])
+        match self
+            .get_prioritization_fees_for_accounts(&[*execution_account])
             .await
+        {
+            Ok(estimate) => {
+                info!(
+                    "Successfully estimated claim fee: {} micro-lamports per CU",
+                    estimate.micro_lamports_per_cu
+                );
+                Ok(estimate)
+            }
+            Err(e) => {
+                error!("Error in estimate_claim_fee: {:?}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Get fee estimate for proving transactions
@@ -95,7 +121,12 @@ impl FeeService {
         fee_estimate: &FeeEstimate,
     ) -> u64 {
         // Convert micro-lamports to lamports (1 lamport = 1_000_000 micro-lamports)
-        (fee_estimate.micro_lamports_per_cu * compute_units) / 1_000_000
+        let cost = (fee_estimate.micro_lamports_per_cu * compute_units) / 1_000_000;
+        info!(
+            "Calculated transaction cost: {} lamports (CU={}, micro_lamports_per_cu={})",
+            cost, compute_units, fee_estimate.micro_lamports_per_cu
+        );
+        cost
     }
 
     /// Check if a transaction is profitable given costs and tip
@@ -109,12 +140,17 @@ impl FeeService {
         &self,
         accounts: &[Pubkey],
     ) -> Result<FeeEstimate> {
+        info!(
+            "Getting prioritization fees for {} accounts",
+            accounts.len()
+        );
         match self
             .rpc_client
             .get_recent_prioritization_fees(accounts)
             .await
         {
             Ok(fees) => {
+                info!("RPC returned {} fee entries", fees.len());
                 if fees.is_empty() {
                     warn!("No prioritization fees returned for accounts, using default");
                     return Ok(FeeEstimate {
@@ -124,6 +160,7 @@ impl FeeService {
 
                 // Calculate configured percentile from the recent fees
                 let mut fee_values: Vec<u64> = fees.iter().map(|f| f.prioritization_fee).collect();
+                info!("Raw fee values: {:?}", fee_values);
                 fee_values.sort_unstable();
 
                 let len = fee_values.len();
@@ -136,8 +173,24 @@ impl FeeService {
                     self.config.default_micro_lamports_per_cu
                 };
 
+                info!(
+                    "Selected {}th percentile fee: {} micro-lamports per CU from {} values",
+                    self.config.percentile, percentile_fee, len
+                );
+
+                // If calculated fee is 0 (common in local dev), use default fallback
+                let final_fee = if percentile_fee == 0 {
+                    warn!(
+                        "Calculated fee is 0, using default fallback: {} micro-lamports per CU",
+                        self.config.default_micro_lamports_per_cu
+                    );
+                    self.config.default_micro_lamports_per_cu
+                } else {
+                    percentile_fee
+                };
+
                 Ok(FeeEstimate {
-                    micro_lamports_per_cu: percentile_fee,
+                    micro_lamports_per_cu: final_fee,
                 })
             }
             Err(e) => {

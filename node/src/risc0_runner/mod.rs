@@ -737,7 +737,7 @@ async fn handle_image_deployment<'a>(
     loaded_images: LoadedImageMapRef<'a>,
 ) -> Result<()> {
     let url = deploy.url().ok_or(Risc0RunnerError::InvalidData)?;
-    let size = deploy.size();
+    let size = deploy.size_();
     let image_id = deploy.image_id().unwrap_or_default();
     let program_name = deploy.program_name().unwrap_or_default();
 

@@ -1,5 +1,5 @@
 {
-  "imageId": "68f4b0c5f9ce034aa60ceb264a18d6c410a3af68fafd931bcfd9ebe7c1e42960",
+  "imageId": "af8b62f1b3f2687d447730482f42c5e311223f87c0f68e7de237188a358162bc",
   "executionConfig": {
     "verifyInputHash": false,
     "forwardOutput": true
@@ -7,7 +7,7 @@
   "inputs": [
     {
       "inputType": "PublicData",
-      "data": "{\"attestation\":\"test\"}"
+      "data": "0x7b226174746573746174696f6e223a2274657374227d"
     },
     {
       "inputType": "Private",
@@ -18,7 +18,9 @@
   "expiry": 100,
   "callbackConfig": {
     "programId": "exay1T7QqsJPNcwzMiWubR6vZnqrgM16jZRraHgqBGG",
-    "instructionPrefix": [1],
+    "instructionPrefix": [
+      1
+    ],
     "extraAccounts": [
       {
         "pubkey": "3b6DR2gbTJwrrX27VLEZ2FJcHrDvTSLKEcTLVhdxCoaf",
